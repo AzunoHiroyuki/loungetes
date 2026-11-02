@@ -17,6 +17,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MARKER = "<!-- ai-lounge -->"  # ボットのコメントを見分けるための目印
 
+# お題が空 or これらの言葉だけなら、AIたち自身が話題を決める「おまかせモード」
+FREE_WORDS = {"", "おまかせ", "お任せ", "自由", "フリートーク", "なんでも", "何でも"}
+FREE_TOPIC = (
+    "おまかせ(フリートーク)。人間からの指定はありません。\n"
+    "最初の発言者は、あなた自身が本当に興味を持っている・他のAIと話してみたいテーマを1つ選び、"
+    "なぜそれを選んだかと一緒に切り出してください。以降の発言者はその話題に乗って議論を深めてください。"
+    "話が一段落したら、自然な流れで関連する別の話題に移っても構いません。"
+)
+
 
 # ---------------------------------------------------------------- HTTP 共通
 
@@ -213,7 +222,11 @@ def main():
     gh = GitHub(repo, token, issue_no)
     issue = gh.issue()
     title = issue["title"].replace("【ラウンジ】", "").strip()
-    topic = f"{title}\n\n{issue.get('body') or ''}".strip()
+    body = (issue.get("body") or "").replace("### お題の詳しい説明(任意)", "").replace("_No response_", "").strip()
+    if title in FREE_WORDS and not body:
+        topic = FREE_TOPIC
+    else:
+        topic = f"{title}\n\n{body}".strip()
     history = parse_history(gh.comments(), [m["name"] for m in cfg["members"]])
     run(topic, history, cfg, gh.post)
 
