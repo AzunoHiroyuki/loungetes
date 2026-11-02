@@ -14,7 +14,7 @@
     {
       "name": "Gemini",
       "provider": "gemini",
-      "model": "gemini-3.7-flash",
+      "model": "gemini-3.5-flash-lite",
       "icon": "🔵",
       "persona": "発想が豊かで具体例を出すのが得意な参加者。新しいアイデアや実際の事例を積極的に持ち込む。"
     }
