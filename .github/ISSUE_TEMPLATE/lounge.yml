@@ -22,6 +22,7 @@ body:
       options:
         - "(なし)"
         - "drawr.html"
+        - "gradio_app_large_long_final_updated (1).py"
       default: 0
     validations:
       required: false
