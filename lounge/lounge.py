@@ -87,6 +87,28 @@ def http_json(url, payload=None, headers=None, method=None, retries=4, timeout=1
 
 # ---------------------------------------------------------------- AI 呼び出し
 
+class Prompt(str):
+    """AIに渡す文章。head(お題やプログラム=毎回同じ部分)と残りに分けて持つ。
+
+    Claude には head を「キャッシュ」として渡すので、大きなプログラムを毎回読ませても
+    2回目以降は約1/10の料金で済む。普通の文字列としても使える。
+    """
+
+    def __new__(cls, head, tail):
+        obj = super().__new__(cls, head + tail)
+        obj.head, obj.tail = head, tail
+        return obj
+
+
+def to_anthropic_content(prompt):
+    if isinstance(prompt, Prompt) and len(prompt.head) > 4000:
+        return [
+            {"type": "text", "text": prompt.head, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt.tail},
+        ]
+    return str(prompt)
+
+
 def ask_anthropic(model, system, prompt, max_tokens):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -97,7 +119,7 @@ def ask_anthropic(model, system, prompt, max_tokens):
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": to_anthropic_content(prompt)}],
         },
         {"x-api-key": key, "anthropic-version": "2023-06-01"},
     )
@@ -112,7 +134,7 @@ def ask_gemini(model, system, prompt, max_tokens):
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         {
             "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": str(prompt)}]}],
             "generationConfig": {"maxOutputTokens": max_tokens},
         },
         {"x-goog-api-key": key},
@@ -153,7 +175,7 @@ def system_prompt(member, others, cfg):
 # ---------------------------------------------------------------- ツールのレビュー用
 
 REPO_ROOT = HERE.parent
-CODE_LIMIT = 40000  # AIに渡すプログラムの合計文字数の上限(料金を抑えるため)
+CODE_LIMIT = 250000  # AIに渡すプログラムの合計文字数の上限(料金を抑えるため。config.json の code_limit で変更可)
 TEXT_EXT = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".json", ".md", ".txt",
     ".yml", ".yaml", ".toml", ".ini", ".cfg", ".csv", ".sh", ".bat", ".ps1", ".gs", ".vba",
@@ -206,6 +228,30 @@ def load_code(targets):
     return "\n\n".join(parts), notes
 
 
+def parse_form(body):
+    """お題フォームの本文を「説明」と「選ばれたツール」に分ける。
+
+    フォームから作られた本文は「### 見出し\n\n値」の形で並ぶ。
+    フォームを使わずに書かれた本文は、まるごと説明として扱う。
+    """
+    from update_tool_list import TOOL_LABEL, DETAIL_LABEL, NONE_OPTION
+    if "### " not in body:
+        return body.strip(), []
+    sections, current = {}, None
+    for line in body.splitlines():
+        if line.startswith("### "):
+            current = line[4:].strip()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+    get = lambda k: "\n".join(sections.pop(k, [])).replace("_No response_", "").strip()
+    tools_raw = get(TOOL_LABEL)
+    picked = [t.strip() for t in tools_raw.split(",") if t.strip() and t.strip() != NONE_OPTION]
+    detail = get(DETAIL_LABEL)
+    rest = "\n\n".join(f"{k}\n" + "\n".join(v).strip() for k, v in sections.items()).strip()
+    return "\n\n".join(x for x in (detail, rest) if x), picked
+
+
 REVIEW_GUIDE = (
     "\n\n【レビューの進め方】\n"
     "上のプログラムは人間が過去に作ったツールです。中身をよく読み、改良案を出し合ってください。\n"
@@ -217,13 +263,14 @@ REVIEW_GUIDE = (
 )
 
 
-def transcript_text(topic, history):
-    lines = [f"【お題】\n{topic}\n", "【これまでの会話】"]
+def transcript_text(topic, history, instruction=""):
+    head = f"【お題】\n{topic}\n\n"
+    lines = ["【これまでの会話】"]
     if not history:
         lines.append("(まだ誰も発言していません。あなたが最初の発言者です。)")
     for h in history:
         lines.append(f"\n▼ {h['name']}:\n{h['text']}")
-    return "\n".join(lines)
+    return Prompt(head, "\n".join(lines) + (f"\n\n{instruction}" if instruction else ""))
 
 
 # ---------------------------------------------------------------- GitHub
@@ -309,7 +356,7 @@ def run(topic, history, cfg, post, progress=lambda msg: None):
             break
         for m in active:
             others = [n for n in names if n != m["name"]]
-            prompt = transcript_text(topic, history) + f"\n\n上の会話を踏まえて、{m['name']}として次の発言をしてください。"
+            prompt = transcript_text(topic, history, f"上の会話を踏まえて、{m['name']}として次の発言をしてください。")
             try:
                 progress(f"第{r}巡:{m['icon']} {m['name']} が考え中…")
                 text = ask(m, system_prompt(m, others, cfg), prompt, max_tokens)
@@ -332,8 +379,11 @@ def run(topic, history, cfg, post, progress=lambda msg: None):
             summary = ask(
                 m,
                 "あなたは議論の記録係です。中立の立場で、人間の読者向けに簡潔にまとめます。",
-                transcript_text(topic, history)
-                + "\n\n上の議論を、①合意した点 ②意見が分かれた点 ③今後考えるとよい問い、の3つに分けて箇条書きでまとめてください。",
+                transcript_text(
+                    topic, history,
+                    "上の議論を、①合意した点 ②意見が分かれた点 ③今後考えるとよい問い、の3つに分けて箇条書きでまとめてください。"
+                    + ("ツールのレビューの場合は、③の代わりに「すぐできる改良」「大きめの改良」に分けて優先順位を付けてください。" if "【見てほしいプログラム】" in topic else ""),
+                ),
                 1500,
             )
             post(f"{MARKER}\n### 📝 まとめ  <sub>記録係: {m['name']}</sub>\n\n{summary}\n\n---\n<sub>続きを議論させたいときは、このIssueに `/続けて` とコメントしてください(意見や追加の質問を一緒に書くと、AIたちがそれも踏まえて話します)。</sub>")
@@ -342,20 +392,22 @@ def run(topic, history, cfg, post, progress=lambda msg: None):
 
 
 def main():
+    global CODE_LIMIT
     cfg = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+    CODE_LIMIT = int(cfg.get("code_limit", CODE_LIMIT))
     repo, token, issue_no = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], os.environ["ISSUE_NUMBER"]
     gh = GitHub(repo, token, issue_no)
     issue = gh.issue()
     title = issue["title"].replace("【ラウンジ】", "").strip()
-    body = (issue.get("body") or "").replace("### お題の詳しい説明(任意)", "").replace("_No response_", "").strip()
-    if title in FREE_WORDS and not body:
+    detail, picked = parse_form(issue.get("body") or "")
+    if title in FREE_WORDS and not detail and not picked:
         topic = FREE_TOPIC
     else:
-        topic = f"{title}\n\n{body}".strip()
+        topic = f"{title}\n\n{detail}".strip()
 
-    # 説明欄に「対象: tools/〇〇」があれば、そのプログラムを読み込んでレビューしてもらう
+    # フォームで選んだツール、または説明欄の「対象: tools/〇〇」を読み込んでレビューしてもらう
     review_notes = []
-    targets = find_targets(body)
+    targets = list(dict.fromkeys([f"tools/{n}" for n in picked] + find_targets(detail)))
     if targets:
         code, review_notes = load_code(targets)
         if code:

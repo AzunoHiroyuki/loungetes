@@ -1,3 +1,5 @@
+# このファイルは lounge/update_tool_list.py が自動で作っています。
+# 選択肢を変えたいときは tools フォルダの中身を変えてください(直接書き換えても次回上書きされます)。
 name: 🛋️ AIラウンジでお題を出す
 description: ClaudeとGeminiに、このお題について意見交換してもらいます
 title: "【ラウンジ】"
@@ -10,11 +12,22 @@ body:
 
         **AIたちに話題を決めてほしいとき**は、タイトルを「【ラウンジ】おまかせ」にして送信してください。
 
-        **作ったツールを見てもらいたいとき**は、ツールを `tools` フォルダに入れてから、説明欄に「対象: tools/ツール名」と書いてください。
+        **作ったツールを見てもらいたいとき**は、下の「見てもらうツール(任意)」から選んでください(複数選べます)。
+        一覧にないときは、ツールを `tools` フォルダに入れると1〜2分で選べるようになります。
+  - type: dropdown
+    id: tool
+    attributes:
+      label: "見てもらうツール(任意)"
+      multiple: true
+      options:
+        - "(なし)"
+        - "drawr.html"
+      default: 0
+    validations:
+      required: false
   - type: textarea
     id: detail
     attributes:
-      label: お題の詳しい説明(任意)
+      label: "お題の詳しい説明(任意)"
       placeholder: |
         例)背景や、特に話し合ってほしい点など
-        ツールを見てほしいときは → 対象: tools/ツール名

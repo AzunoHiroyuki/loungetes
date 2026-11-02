@@ -3,6 +3,7 @@
   "max_chars_per_turn": 600,
   "summary": true,
   "language": "日本語",
+  "code_limit": 250000,
   "members": [
     {
       "name": "Claude",
