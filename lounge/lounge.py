@@ -29,7 +29,29 @@ FREE_TOPIC = (
 
 # ---------------------------------------------------------------- HTTP 共通
 
-def http_json(url, payload=None, headers=None, method=None, retries=5):
+class QuotaExceeded(RuntimeError):
+    """利用枠(無料枠や残高)を使い切った。待っても今回の実行中は回復しないので再試行しない。"""
+
+
+def describe_quota(detail):
+    """Gemini などの 429 応答から、どの枠を超えたかを日本語で説明する。"""
+    try:
+        err = json.loads(detail).get("error", {})
+    except Exception:
+        return "利用枠を超えました"
+    ids = []
+    for d in err.get("details", []):
+        for v in d.get("violations", []):
+            ids.append(f"{v.get('quotaId', '')}(上限 {v.get('quotaValue', '?')})")
+    kinds = " / ".join(ids)
+    if "PerDay" in kinds:
+        return f"1日あたりの利用枠を使い切りました: {kinds}"
+    if "PerMinute" in kinds:
+        return f"1分あたりの利用枠を超えました: {kinds}"
+    return f"利用枠を超えました: {kinds or err.get('message', '')[:120]}"
+
+
+def http_json(url, payload=None, headers=None, method=None, retries=4, timeout=150):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"))
     req.add_header("Content-Type", "application/json")
@@ -38,12 +60,18 @@ def http_json(url, payload=None, headers=None, method=None, retries=5):
     last_err = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=240) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:500]
-            last_err = RuntimeError(f"HTTP {e.code}: {detail}")
+            detail = e.read().decode("utf-8", "replace")
+            if e.code == 429 and ("quota" in detail.lower() or "credit balance" in detail.lower()):
+                # 1日の枠や残高切れは、待っても回復しないのですぐ諦める
+                if "PerMinute" in detail and attempt < retries - 1:
+                    time.sleep(65)  # 1分あたりの枠なら、1分待てば回復する
+                    continue
+                raise QuotaExceeded(describe_quota(detail))
+            last_err = RuntimeError(f"HTTP {e.code}: {detail[:300]}")
             if e.code in (429, 500, 502, 503, 504, 529):  # 混雑時は待つ時間を延ばしながら再試行
                 time.sleep(10 * (attempt + 1))
                 continue
@@ -207,13 +235,22 @@ def run(topic, history, cfg, post, progress=lambda msg: None):
     max_tokens = int(cfg["max_chars_per_turn"] * 2.5)  # 日本語は1文字≒1〜2トークン、余裕を持たせる
     start_round = len([h for h in history if h["name"] in names]) // len(members) + 1
 
+    out_of_quota = set()  # 利用枠を使い切ったメンバーは、この回はもう呼ばない
     for r in range(start_round, start_round + cfg["rounds"]):
-        for m in members:
+        active = [m for m in members if m["name"] not in out_of_quota]
+        if len(active) < min(2, len(members)):  # 相手がいなくなったら独り言にせず終える
+            break
+        for m in active:
             others = [n for n in names if n != m["name"]]
             prompt = transcript_text(topic, history) + f"\n\n上の会話を踏まえて、{m['name']}として次の発言をしてください。"
             try:
                 progress(f"第{r}巡:{m['icon']} {m['name']} が考え中…")
                 text = ask(m, system_prompt(m, others, cfg), prompt, max_tokens)
+            except QuotaExceeded as e:
+                out_of_quota.add(m["name"])
+                print(f"[{m['name']}] 利用枠切れ: {e}", file=sys.stderr)
+                post(f"{MARKER}\n> 🪫 {m['name']} は利用枠を使い切ったため、今回はここで退席します。\n> {e}\n> (Geminiの無料枠は毎日 日本時間17時ごろ〔夏は16時ごろ〕にリセットされます)")
+                continue
             except Exception as e:  # 1体が失敗しても、ラウンジ全体は止めない
                 print(f"[{m['name']}] エラー: {e}", file=sys.stderr)
                 post(f"{MARKER}\n> ⚠️ {m['name']} は今回発言できませんでした({str(e)[:200]})")
