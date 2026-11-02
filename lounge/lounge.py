@@ -135,7 +135,8 @@ def transcript_text(topic, history):
 
 class GitHub:
     def __init__(self, repo, token, issue):
-        self.base = f"https://api.github.com/repos/{repo}/issues/{issue}"
+        self.repo_base = f"https://api.github.com/repos/{repo}"
+        self.base = f"{self.repo_base}/issues/{issue}"
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -156,6 +157,22 @@ class GitHub:
 
     def post(self, body):
         return http_json(f"{self.base}/comments", {"body": body}, self.headers)
+
+    def edit(self, comment_id, body):
+        return http_json(f"{self.repo_base}/issues/comments/{comment_id}", {"body": body}, self.headers, method="PATCH")
+
+    def react(self, content, comment_id=None):
+        """👀 などの絵文字リアクションを付ける(失敗しても議論は止めない)。"""
+        url = f"{self.repo_base}/issues/comments/{comment_id}/reactions" if comment_id else f"{self.base}/reactions"
+        try:
+            http_json(url, {"content": content}, self.headers, retries=1)
+        except Exception as e:
+            print(f"リアクション失敗: {e}", file=sys.stderr)
+
+
+def status_text(state, detail, run_url):
+    link = f"  <sub>[実行の記録を見る]({run_url})</sub>" if run_url else ""
+    return f"{MARKER}\n> {state} {detail}{link}"
 
 
 def format_comment(member, text, round_no):
@@ -184,7 +201,7 @@ def parse_history(comments, member_names):
 
 # ---------------------------------------------------------------- メイン
 
-def run(topic, history, cfg, post):
+def run(topic, history, cfg, post, progress=lambda msg: None):
     members = cfg["members"]
     names = [m["name"] for m in members]
     max_tokens = int(cfg["max_chars_per_turn"] * 2.5)  # 日本語は1文字≒1〜2トークン、余裕を持たせる
@@ -195,6 +212,7 @@ def run(topic, history, cfg, post):
             others = [n for n in names if n != m["name"]]
             prompt = transcript_text(topic, history) + f"\n\n上の会話を踏まえて、{m['name']}として次の発言をしてください。"
             try:
+                progress(f"第{r}巡:{m['icon']} {m['name']} が考え中…")
                 text = ask(m, system_prompt(m, others, cfg), prompt, max_tokens)
             except Exception as e:  # 1体が失敗しても、ラウンジ全体は止めない
                 print(f"[{m['name']}] エラー: {e}", file=sys.stderr)
@@ -231,7 +249,27 @@ def main():
     else:
         topic = f"{title}\n\n{body}".strip()
     history = parse_history(gh.comments(), [m["name"] for m in cfg["members"]])
-    run(topic, history, cfg, gh.post)
+
+    # 動いていることが分かるように: きっかけのコメント(またはIssue)に 👀 を付け、
+    # 進み具合を書き換えていく「状況」コメントを1つ置く
+    comment_id = os.environ.get("COMMENT_ID") or None
+    run_url = os.environ.get("RUN_URL", "")
+    gh.react("eyes", comment_id)
+    status = gh.post(status_text("⏳", "ラウンジを開いています…", run_url))
+
+    def progress(msg):
+        try:
+            gh.edit(status["id"], status_text("⏳", f"議論中 — {msg}", run_url))
+        except Exception as e:
+            print(f"状況の更新に失敗: {e}", file=sys.stderr)
+
+    try:
+        run(topic, history, cfg, gh.post, progress)
+    except Exception as e:
+        gh.edit(status["id"], status_text("❌", f"途中で止まりました({str(e)[:150]})", run_url))
+        raise
+    gh.edit(status["id"], status_text("✅", "今回の議論が終わりました。下に発言とまとめが並んでいます。", run_url))
+    gh.react("rocket", comment_id)
 
 
 if __name__ == "__main__":
