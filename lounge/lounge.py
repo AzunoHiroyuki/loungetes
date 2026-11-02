@@ -109,6 +109,16 @@ def to_anthropic_content(prompt):
     return str(prompt)
 
 
+def tidy_cut(text, truncated):
+    """上限で途切れた発言を、最後の文の区切りまで戻して読みやすくする。"""
+    if not truncated:
+        return text
+    cut = max(text.rfind(c) for c in ("。", "\n", "!", "?", ".", "」"))
+    if cut > len(text) * 0.5:
+        text = text[: cut + 1]
+    return text.rstrip() + "\n\n<sub>(長くなったため、ここで区切りました)</sub>"
+
+
 def ask_anthropic(model, system, prompt, max_tokens):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -123,7 +133,8 @@ def ask_anthropic(model, system, prompt, max_tokens):
         },
         {"x-api-key": key, "anthropic-version": "2023-06-01"},
     )
-    return "".join(b.get("text", "") for b in res.get("content", []) if b.get("type") == "text").strip()
+    text = "".join(b.get("text", "") for b in res.get("content", []) if b.get("type") == "text").strip()
+    return tidy_cut(text, res.get("stop_reason") == "max_tokens")
 
 
 def ask_gemini(model, system, prompt, max_tokens):
@@ -139,11 +150,12 @@ def ask_gemini(model, system, prompt, max_tokens):
         },
         {"x-goog-api-key": key},
     )
-    parts = (res.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+    cand = (res.get("candidates") or [{}])[0]
+    parts = cand.get("content", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
     if not text:
         raise RuntimeError(f"Gemini から空の応答: {json.dumps(res, ensure_ascii=False)[:300]}")
-    return text
+    return tidy_cut(text, cand.get("finishReason") == "MAX_TOKENS")
 
 
 PROVIDERS = {"anthropic": ask_anthropic, "gemini": ask_gemini}
@@ -346,7 +358,7 @@ def parse_history(comments, member_names):
 def run(topic, history, cfg, post, progress=lambda msg: None):
     members = cfg["members"]
     names = [m["name"] for m in members]
-    max_tokens = int(cfg["max_chars_per_turn"] * 2.5)  # 日本語は1文字≒1〜2トークン、余裕を持たせる
+    max_tokens = int(cfg["max_chars_per_turn"] * 5)  # 日本語は1文字≒1〜2トークン。途切れないよう大きめに
     start_round = len([h for h in history if h["name"] in names]) // len(members) + 1
 
     out_of_quota = set()  # 利用枠を使い切ったメンバーは、この回はもう呼ばない
@@ -381,10 +393,10 @@ def run(topic, history, cfg, post, progress=lambda msg: None):
                 "あなたは議論の記録係です。中立の立場で、人間の読者向けに簡潔にまとめます。",
                 transcript_text(
                     topic, history,
-                    "上の議論を、①合意した点 ②意見が分かれた点 ③今後考えるとよい問い、の3つに分けて箇条書きでまとめてください。"
+                    "上の議論を、全体で1500文字程度に収まるように、①合意した点 ②意見が分かれた点 ③今後考えるとよい問い、の3つに分けて箇条書きでまとめてください。"
                     + ("ツールのレビューの場合は、③の代わりに「すぐできる改良」「大きめの改良」に分けて優先順位を付けてください。" if "【見てほしいプログラム】" in topic else ""),
                 ),
-                1500,
+                int(cfg.get("summary_max_tokens", 6000)),
             )
             post(f"{MARKER}\n### 📝 まとめ  <sub>記録係: {m['name']}</sub>\n\n{summary}\n\n---\n<sub>続きを議論させたいときは、このIssueに `/続けて` とコメントしてください(意見や追加の質問を一緒に書くと、AIたちがそれも踏まえて話します)。</sub>")
         except Exception as e:
