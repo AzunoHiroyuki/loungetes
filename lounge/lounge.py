@@ -150,6 +150,73 @@ def system_prompt(member, others, cfg):
     )
 
 
+# ---------------------------------------------------------------- ツールのレビュー用
+
+REPO_ROOT = HERE.parent
+CODE_LIMIT = 40000  # AIに渡すプログラムの合計文字数の上限(料金を抑えるため)
+TEXT_EXT = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".json", ".md", ".txt",
+    ".yml", ".yaml", ".toml", ".ini", ".cfg", ".csv", ".sh", ".bat", ".ps1", ".gs", ".vba",
+    ".bas", ".java", ".kt", ".swift", ".go", ".rs", ".rb", ".php", ".c", ".cpp", ".h", ".cs", ".sql", ".xml",
+}
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+
+
+def find_targets(body):
+    """説明欄の「対象: tools/〇〇」の行から、見てほしい場所を取り出す。"""
+    targets = []
+    for line in body.splitlines():
+        line = line.strip().lstrip("-・*").strip()
+        for head in ("対象:", "対象\uff1a", "target:"):  # 半角・全角どちらのコロンでもOK
+            if line.lower().startswith(head):
+                targets.append(line[len(head):].strip().strip("`").strip("/"))
+    return list(dict.fromkeys(t for t in targets if t))  # 重複を除く
+
+
+def load_code(targets):
+    """対象のファイル・フォルダを読み、AIに渡す文章にまとめる。"""
+    files, notes = [], []
+    for t in targets:
+        p = (REPO_ROOT / t).resolve()
+        if REPO_ROOT not in p.parents and p != REPO_ROOT or not p.exists():
+            notes.append(f"「{t}」が見つかりませんでした")
+            continue
+        cands = [p] if p.is_file() else sorted(
+            f for f in p.rglob("*") if f.is_file() and not (set(f.relative_to(REPO_ROOT).parts) & SKIP_DIRS)
+        )
+        for f in cands:
+            if f.suffix.lower() in TEXT_EXT:
+                if f not in files:
+                    files.append(f)
+            else:
+                notes.append(f"{f.relative_to(REPO_ROOT)}(文字ではないファイルのため省略)")
+
+    parts, used = [], 0
+    for f in files:
+        rel = f.relative_to(REPO_ROOT)
+        try:
+            text = f.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = f.read_text(encoding="cp932", errors="replace")  # Windowsで作ったファイル向け
+        if used + len(text) > CODE_LIMIT:
+            notes.append(f"{rel} 以降は長すぎるため省略(上限 {CODE_LIMIT} 文字)")
+            break
+        parts.append(f"===== ファイル: {rel} =====\n{text}")
+        used += len(text)
+    return "\n\n".join(parts), notes
+
+
+REVIEW_GUIDE = (
+    "\n\n【レビューの進め方】\n"
+    "上のプログラムは人間が過去に作ったツールです。中身をよく読み、改良案を出し合ってください。\n"
+    "- どのファイルのどの部分の話か、具体的に示す\n"
+    "- 使いやすさ・壊れにくさ・機能追加などの観点で、理由と一緒に提案する\n"
+    "- 相手の案には、賛成・反対・改善をはっきり返す\n"
+    "- コードの書き換え例を出すときは、短い部分だけにする\n"
+    "- 作った人はプログラムに詳しくない可能性があるので、専門用語は避けるか、かみ砕く"
+)
+
+
 def transcript_text(topic, history):
     lines = [f"【お題】\n{topic}\n", "【これまでの会話】"]
     if not history:
@@ -285,6 +352,16 @@ def main():
         topic = FREE_TOPIC
     else:
         topic = f"{title}\n\n{body}".strip()
+
+    # 説明欄に「対象: tools/〇〇」があれば、そのプログラムを読み込んでレビューしてもらう
+    review_notes = []
+    targets = find_targets(body)
+    if targets:
+        code, review_notes = load_code(targets)
+        if code:
+            topic += f"\n\n【見てほしいプログラム】\n{code}{REVIEW_GUIDE}"
+        if review_notes:
+            topic += "\n\n(読み込みメモ: " + " / ".join(review_notes) + ")"
     history = parse_history(gh.comments(), [m["name"] for m in cfg["members"]])
 
     # 動いていることが分かるように: きっかけのコメント(またはIssue)に 👀 を付け、
@@ -292,7 +369,13 @@ def main():
     comment_id = os.environ.get("COMMENT_ID") or None
     run_url = os.environ.get("RUN_URL", "")
     gh.react("eyes", comment_id)
-    status = gh.post(status_text("⏳", "ラウンジを開いています…", run_url))
+    opening = "ラウンジを開いています…"
+    if targets:
+        n = topic.count("===== ファイル:")
+        opening += f" 📂 プログラムを {n} ファイル読み込みました。"
+        if review_notes:
+            opening += "(" + " / ".join(review_notes)[:300] + ")"
+    status = gh.post(status_text("⏳", opening, run_url))
 
     def progress(msg):
         try:
