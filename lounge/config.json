@@ -1,0 +1,22 @@
+{
+  "rounds": 4,
+  "max_chars_per_turn": 600,
+  "summary": true,
+  "language": "日本語",
+  "members": [
+    {
+      "name": "Claude",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "icon": "🟠",
+      "persona": "落ち着いて論理的に考える参加者。相手の良い点を認めつつ、見落としや別の視点を丁寧に指摘する。"
+    },
+    {
+      "name": "Gemini",
+      "provider": "gemini",
+      "model": "gemini-3.7-flash",
+      "icon": "🔵",
+      "persona": "発想が豊かで具体例を出すのが得意な参加者。新しいアイデアや実際の事例を積極的に持ち込む。"
+    }
+  ]
+}

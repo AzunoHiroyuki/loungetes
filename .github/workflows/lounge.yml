@@ -1,0 +1,45 @@
+name: AIラウンジ
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: lounge-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  lounge:
+    # 開始条件:
+    #  - タイトルが【ラウンジ】で始まる Issue が作られた / 「lounge」ラベルが付いた
+    #  - リポジトリの持ち主・メンバーが「/続けて」とコメントした
+    if: >-
+      (github.event_name == 'issues' && github.event.action == 'opened' &&
+        startsWith(github.event.issue.title, '【ラウンジ】') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issues' && github.event.action == 'labeled' &&
+        github.event.label.name == 'lounge') ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+        (contains(github.event.comment.body, '/続けて') || contains(github.event.comment.body, '/continue')) &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: AIたちが議論する
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python lounge/lounge.py
