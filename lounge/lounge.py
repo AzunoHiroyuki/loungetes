@@ -29,7 +29,7 @@ FREE_TOPIC = (
 
 # ---------------------------------------------------------------- HTTP 共通
 
-def http_json(url, payload=None, headers=None, method=None, retries=3):
+def http_json(url, payload=None, headers=None, method=None, retries=5):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"))
     req.add_header("Content-Type", "application/json")
@@ -38,19 +38,22 @@ def http_json(url, payload=None, headers=None, method=None, retries=3):
     last_err = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=240) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:500]
             last_err = RuntimeError(f"HTTP {e.code}: {detail}")
-            if e.code in (429, 500, 502, 503, 529):  # 混雑時は少し待って再試行
-                time.sleep(5 * (attempt + 1))
+            if e.code in (429, 500, 502, 503, 504, 529):  # 混雑時は待つ時間を延ばしながら再試行
+                time.sleep(10 * (attempt + 1))
                 continue
             raise last_err
         except urllib.error.URLError as e:
             last_err = RuntimeError(f"接続エラー: {e.reason}")
-            time.sleep(5 * (attempt + 1))
+            time.sleep(10 * (attempt + 1))
+        except (TimeoutError, OSError) as e:  # 応答待ちの時間切れも再試行する
+            last_err = RuntimeError(f"応答待ちの時間切れ: {e}")
+            time.sleep(10 * (attempt + 1))
     raise last_err
 
 
